@@ -2,12 +2,13 @@
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Local};
-use regex::Regex;
 use std::fs::{self, File, create_dir_all};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::notes::utils;
 
 /// Creates a new markdown note in the specified project directory within the vault.
 ///
@@ -25,8 +26,8 @@ pub fn create_note(title: &str, project: &str, vault_directory: &Path) -> Result
     // Ensure project directory exists
     create_dir_all(&project_dir).context("Failed to create project directory")?;
 
-    // Sanitize the title to create a valid filename
-    let sanitized_title = sanitize_filename(title);
+    // Sanitize the title to create a valid filename - using utils function
+    let sanitized_title = utils::sanitize_title(title);
 
     // Make the filename unique
     let unique_filename = ensure_unique_filename(&sanitized_title, vault_directory)?;
@@ -57,30 +58,6 @@ pub fn create_note(title: &str, project: &str, vault_directory: &Path) -> Result
         .context("Failed to write frontmatter to note file")?;
 
     Ok(note_path)
-}
-
-/// Sanitizes a string to create a valid filename.
-fn sanitize_filename(input: &str) -> String {
-    // Replace spaces with hyphens
-    let with_hyphens = input.trim().replace(' ', "-");
-
-    // Replace invalid characters with hyphens
-    let re = Regex::new(r"[<>:/\\|?*\n\r\t]").unwrap();
-    let sanitized = re.replace_all(&with_hyphens, "-").to_string();
-
-    // Replace multiple consecutive hyphens with a single one
-    let re_multiple_hyphens = Regex::new(r"-+").unwrap();
-    let sanitized = re_multiple_hyphens.replace_all(&sanitized, "-").to_string();
-
-    // Remove leading and trailing hyphens
-    let sanitized = sanitized.trim_matches('-').to_string();
-
-    // Ensure filename is not empty after sanitization
-    if sanitized.is_empty() {
-        return "Untitled".to_string();
-    }
-
-    sanitized
 }
 
 /// Ensures the filename is unique within the vault directory.
@@ -114,25 +91,21 @@ fn ensure_unique_filename(base_filename: &str, vault_directory: &Path) -> Result
 }
 
 /// Checks if a file with the given name exists anywhere in the vault directory.
+/// Uses utils::get_file_path_alt to look for the file.
 fn file_exists_in_vault(filename: &str, vault_directory: &Path) -> Result<bool> {
-    let md_filename = format!("{}.md", filename);
-
-    // Walk through all files in the vault directory and check if any match the filename
-    let walker = walkdir::WalkDir::new(vault_directory)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_file());
-
-    for entry in walker {
-        if let Some(entry_filename) = entry.file_name().to_str() {
-            if entry_filename == md_filename {
-                return Ok(true);
+    // Try to find the file using get_file_path_alt
+    match utils::get_file_path_alt(filename, vault_directory) {
+        Ok(_) => Ok(true), // File exists
+        Err(e) => {
+            // If the error is "not found", return false
+            // Otherwise, propagate the error
+            if e.to_string().contains("not found") {
+                Ok(false)
+            } else {
+                Err(e)
             }
         }
     }
-
-    Ok(false)
 }
 
 /// Reads a note from the vault directory by its title using the fd command.
@@ -144,119 +117,25 @@ fn file_exists_in_vault(filename: &str, vault_directory: &Path) -> Result<bool> 
 /// # Returns
 /// * `Result<String>` - The contents of the note on success
 pub fn read_note(title: &str, vault_directory: &Path) -> Result<String> {
-    // Sanitize the title to create a valid filename
-    let sanitized_title = sanitize_filename(title);
-
-    // Escape characters that have special meaning in regex
-    let escaped_title = regex_escape(&sanitized_title);
-
-    // Use fd to find the file in the vault with exact match
-    // Using word boundaries to ensure exact match
-    let output = Command::new("fd")
-        .args(&[
-            &format!("^{}(\\.md|\\.markdown)$", escaped_title),
-            vault_directory.to_str().unwrap_or("."),
-            "--type",
-            "f",
-        ])
-        .output()
-        .context("Failed to execute fd command")?;
-
-    if !output.status.success() {
-        return Err(anyhow!(
-            "fd command failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
-    // Get the output as a string
-    let stdout = String::from_utf8(output.stdout).context("Failed to parse fd command output")?;
-
-    // Split by newlines and get all results
-    let file_paths: Vec<&str> = stdout
-        .trim()
-        .split('\n')
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    if file_paths.is_empty() {
-        return Err(anyhow!("Note with title '{}' not found", title));
-    }
-
-    // Check if multiple files match
-    if file_paths.len() > 1 {
-        let file_list = file_paths.join("\n  - ");
-        return Err(anyhow!(
-            "Multiple files found for title '{}'. Cannot determine which one to use:\n  - {}",
-            title,
-            file_list
-        ));
-    }
+    // Use utils::get_file_path which uses fd to find the file
+    let file_path = utils::get_file_path(title, vault_directory)?;
 
     // Read the contents of the file
-    let file_contents = fs::read_to_string(&file_paths[0])
-        .context(format!("Failed to read file at path: {}", file_paths[0]))?;
+    let file_contents = fs::read_to_string(&file_path)
+        .context(format!("Failed to read file at path: {:?}", file_path))?;
 
     Ok(file_contents)
-}
-
-/// Escapes special characters in a string for use in a regex pattern
-fn regex_escape(s: &str) -> String {
-    let special_chars = [
-        '.', '^', '$', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|', '\\',
-    ];
-    let mut result = String::with_capacity(s.len() * 2);
-
-    for c in s.chars() {
-        if special_chars.contains(&c) {
-            result.push('\\');
-        }
-        result.push(c);
-    }
-
-    result
 }
 
 /// Alternative implementation without relying on external fd command
 pub fn read_note_alt(title: &str, vault_directory: &Path) -> Result<String> {
-    // Sanitize the title to create a valid filename
-    let sanitized_title = sanitize_filename(title);
-
-    // Find the file in the vault directory
-    let file_path = find_note_path(&sanitized_title, vault_directory)?;
-
-    if file_path.is_none() {
-        return Err(anyhow!("Note with title '{}' not found", title));
-    }
+    // Use utils::get_file_path_alt to find the file
+    let file_path = utils::get_file_path_alt(title, vault_directory)?;
 
     // Read the contents of the file
-    let file_contents =
-        fs::read_to_string(file_path.unwrap()).context("Failed to read note file")?;
+    let file_contents = fs::read_to_string(&file_path).context("Failed to read note file")?;
 
     Ok(file_contents)
-}
-
-/// Finds a note path by its sanitized title
-fn find_note_path(sanitized_title: &str, vault_directory: &Path) -> Result<Option<PathBuf>> {
-    let md_pattern = format!("{}.md", sanitized_title);
-    let markdown_pattern = format!("{}.markdown", sanitized_title);
-
-    // Walk through all files in the vault directory and check if any match the filename
-    let walker = walkdir::WalkDir::new(vault_directory)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_file());
-
-    for entry in walker {
-        if let Some(entry_filename) = entry.file_name().to_str() {
-            if entry_filename == md_pattern || entry_filename == markdown_pattern {
-                return Ok(Some(entry.path().to_path_buf()));
-            }
-        }
-    }
-
-    Ok(None)
 }
 
 #[cfg(test)]
@@ -264,25 +143,6 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
-
-    #[test]
-    fn test_sanitize_filename() {
-        assert_eq!(sanitize_filename("Test Title"), "Test-Title");
-        assert_eq!(
-            sanitize_filename("Test/Title:With?Invalid*Chars"),
-            "Test-Title-With-Invalid-Chars"
-        );
-        assert_eq!(
-            sanitize_filename("   Leading and trailing spaces   "),
-            "Leading-and-trailing-spaces"
-        );
-        assert_eq!(
-            sanitize_filename("---Title--with---many-hyphens----"),
-            "Title-with-many-hyphens"
-        );
-        assert_eq!(sanitize_filename(""), "Untitled");
-        assert_eq!(sanitize_filename("//////"), "Untitled");
-    }
 
     #[test]
     fn test_create_note() -> Result<()> {
@@ -545,16 +405,6 @@ mod tests {
         assert!(second_note_result.contains(test_content));
 
         Ok(())
-    }
-
-    #[test]
-    fn test_regex_escape() {
-        assert_eq!(regex_escape("simple"), "simple");
-        assert_eq!(regex_escape("with.dot"), "with\\.dot");
-        assert_eq!(
-            regex_escape("multiple^$.*+?()[]{}|\\chars"),
-            "multiple\\^\\$\\.\\*\\+\\?\\(\\)\\[\\]\\{\\}\\|\\\\chars"
-        );
     }
 
     #[test]
