@@ -150,7 +150,8 @@ pub fn read_note(title: &str, vault_directory: &Path) -> Result<String> {
     // Escape characters that have special meaning in regex
     let escaped_title = regex_escape(&sanitized_title);
 
-    // Use fd to find the file in the vault
+    // Use fd to find the file in the vault with exact match
+    // Using word boundaries to ensure exact match
     let output = Command::new("fd")
         .args(&[
             &format!("^{}(\\.md|\\.markdown)$", escaped_title),
@@ -171,15 +172,29 @@ pub fn read_note(title: &str, vault_directory: &Path) -> Result<String> {
     // Get the output as a string
     let stdout = String::from_utf8(output.stdout).context("Failed to parse fd command output")?;
 
-    // Split by newlines and get the first result
-    let file_paths: Vec<&str> = stdout.trim().split('\n').collect();
+    // Split by newlines and get all results
+    let file_paths: Vec<&str> = stdout
+        .trim()
+        .split('\n')
+        .filter(|s| !s.is_empty())
+        .collect();
 
-    if file_paths.is_empty() || file_paths[0].is_empty() {
+    if file_paths.is_empty() {
         return Err(anyhow!("Note with title '{}' not found", title));
     }
 
+    // Check if multiple files match
+    if file_paths.len() > 1 {
+        let file_list = file_paths.join("\n  - ");
+        return Err(anyhow!(
+            "Multiple files found for title '{}'. Cannot determine which one to use:\n  - {}",
+            title,
+            file_list
+        ));
+    }
+
     // Read the contents of the file
-    let file_contents = fs::read_to_string(file_paths[0])
+    let file_contents = fs::read_to_string(&file_paths[0])
         .context(format!("Failed to read file at path: {}", file_paths[0]))?;
 
     Ok(file_contents)
@@ -521,7 +536,7 @@ mod tests {
 
         // Read the note using the original title
         // This will find either the first or second note based on fd's sorting
-        let contents = read_note(title, vault_directory)?;
+        let _contents = read_note(title, vault_directory)?;
 
         // Try to read the specific numbered note
         let second_note_result = read_note("Duplicate Note-001", vault_directory)?;
@@ -540,5 +555,79 @@ mod tests {
             regex_escape("multiple^$.*+?()[]{}|\\chars"),
             "multiple\\^\\$\\.\\*\\+\\?\\(\\)\\[\\]\\{\\}\\|\\\\chars"
         );
+    }
+
+    #[test]
+    // #[ignore]
+    fn test_read_note_fd_similar_names() -> Result<()> {
+        // Create a temporary directory for testing
+        let temp_dir = tempdir()?;
+        let vault_directory = temp_dir.path();
+
+        // Check if fd is available
+        match Command::new("fd").arg("--version").output() {
+            Ok(_) => {} // fd is available
+            Err(_) => {
+                eprintln!(
+                    "Skipping test_read_note_fd_similar_names because fd command is not available"
+                );
+                return Ok(());
+            }
+        }
+
+        // Create notes with similar names
+        create_note("File", "project", vault_directory)?;
+        create_note("File1", "project", vault_directory)?;
+        create_note("File2", "project", vault_directory)?;
+
+        // Test that we can read the exact file
+        let contents = read_note("File", vault_directory)?;
+        assert!(contents.contains("title: File"));
+
+        // Test that we can read File1 specifically
+        let contents = read_note("File1", vault_directory)?;
+        assert!(contents.contains("title: File1"));
+
+        // Test that we can read File2 specifically
+        let contents = read_note("File2", vault_directory)?;
+        assert!(contents.contains("title: File2"));
+
+        Ok(())
+    }
+
+    #[test]
+    // #[ignore]
+    fn test_read_note_fd_with_special_chars() -> Result<()> {
+        // Create a temporary directory for testing
+        let temp_dir = tempdir()?;
+        let vault_directory = temp_dir.path();
+
+        // Check if fd is available
+        match Command::new("fd").arg("--version").output() {
+            Ok(_) => {} // fd is available
+            Err(_) => {
+                eprintln!(
+                    "Skipping test_read_note_fd_with_special_chars because fd command is not available"
+                );
+                return Ok(());
+            }
+        }
+
+        // Create a note with a title containing special regex characters
+        let title = "Test.With.Special+Chars*And[Brackets]";
+        let note_path = create_note(title, "project", vault_directory)?;
+
+        // Append some content to the file
+        let test_content = "This has special characters in the title.";
+        fs::write(&note_path, fs::read_to_string(&note_path)? + test_content)
+            .context("Failed to append content to test note")?;
+
+        // Read the note
+        let contents = read_note(title, vault_directory)?;
+
+        // Verify the contents
+        assert!(contents.contains(test_content));
+
+        Ok(())
     }
 }
