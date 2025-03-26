@@ -3,9 +3,10 @@
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Local};
 use regex::Regex;
-use std::fs::{File, create_dir_all};
+use std::fs::{self, File, create_dir_all};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Creates a new markdown note in the specified project directory within the vault.
@@ -134,6 +135,115 @@ fn file_exists_in_vault(filename: &str, vault_directory: &Path) -> Result<bool> 
     Ok(false)
 }
 
+/// Reads a note from the vault directory by its title using the fd command.
+///
+/// # Arguments
+/// * `title` - The title of the note to read
+/// * `vault_directory` - The absolute path to the vault directory
+///
+/// # Returns
+/// * `Result<String>` - The contents of the note on success
+pub fn read_note(title: &str, vault_directory: &Path) -> Result<String> {
+    // Sanitize the title to create a valid filename
+    let sanitized_title = sanitize_filename(title);
+
+    // Escape characters that have special meaning in regex
+    let escaped_title = regex_escape(&sanitized_title);
+
+    // Use fd to find the file in the vault
+    let output = Command::new("fd")
+        .args(&[
+            &format!("^{}(\\.md|\\.markdown)$", escaped_title),
+            vault_directory.to_str().unwrap_or("."),
+            "--type",
+            "f",
+        ])
+        .output()
+        .context("Failed to execute fd command")?;
+
+    if !output.status.success() {
+        return Err(anyhow!(
+            "fd command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    // Get the output as a string
+    let stdout = String::from_utf8(output.stdout).context("Failed to parse fd command output")?;
+
+    // Split by newlines and get the first result
+    let file_paths: Vec<&str> = stdout.trim().split('\n').collect();
+
+    if file_paths.is_empty() || file_paths[0].is_empty() {
+        return Err(anyhow!("Note with title '{}' not found", title));
+    }
+
+    // Read the contents of the file
+    let file_contents = fs::read_to_string(file_paths[0])
+        .context(format!("Failed to read file at path: {}", file_paths[0]))?;
+
+    Ok(file_contents)
+}
+
+/// Escapes special characters in a string for use in a regex pattern
+fn regex_escape(s: &str) -> String {
+    let special_chars = [
+        '.', '^', '$', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|', '\\',
+    ];
+    let mut result = String::with_capacity(s.len() * 2);
+
+    for c in s.chars() {
+        if special_chars.contains(&c) {
+            result.push('\\');
+        }
+        result.push(c);
+    }
+
+    result
+}
+
+/// Alternative implementation without relying on external fd command
+pub fn read_note_alt(title: &str, vault_directory: &Path) -> Result<String> {
+    // Sanitize the title to create a valid filename
+    let sanitized_title = sanitize_filename(title);
+
+    // Find the file in the vault directory
+    let file_path = find_note_path(&sanitized_title, vault_directory)?;
+
+    if file_path.is_none() {
+        return Err(anyhow!("Note with title '{}' not found", title));
+    }
+
+    // Read the contents of the file
+    let file_contents =
+        fs::read_to_string(file_path.unwrap()).context("Failed to read note file")?;
+
+    Ok(file_contents)
+}
+
+/// Finds a note path by its sanitized title
+fn find_note_path(sanitized_title: &str, vault_directory: &Path) -> Result<Option<PathBuf>> {
+    let md_pattern = format!("{}.md", sanitized_title);
+    let markdown_pattern = format!("{}.markdown", sanitized_title);
+
+    // Walk through all files in the vault directory and check if any match the filename
+    let walker = walkdir::WalkDir::new(vault_directory)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file());
+
+    for entry in walker {
+        if let Some(entry_filename) = entry.file_name().to_str() {
+            if entry_filename == md_pattern || entry_filename == markdown_pattern {
+                return Ok(Some(entry.path().to_path_buf()));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,5 +343,202 @@ mod tests {
         assert!(second_note_path.to_str().unwrap().contains("Recursive-001"));
 
         Ok(())
+    }
+
+    #[test]
+    fn test_read_note_alt() -> Result<()> {
+        // Create a temporary directory for testing
+        let temp_dir = tempdir()?;
+        let vault_directory = temp_dir.path();
+
+        // Create a test note
+        let title = "Read Test Note";
+        let note_path = create_note(title, "read_test_project", vault_directory)?;
+
+        // Append some content to the file
+        let test_content = "This is some test content.";
+        fs::write(&note_path, fs::read_to_string(&note_path)? + test_content)
+            .context("Failed to append content to test note")?;
+
+        // Read the note
+        let contents = read_note_alt(title, vault_directory)?;
+
+        // Verify the contents
+        assert!(contents.contains("title: Read Test Note"));
+        assert!(contents.contains("date: "));
+        assert!(contents.contains("created_at: "));
+        assert!(contents.contains("modified_at: "));
+        assert!(contents.contains(test_content));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_note_alt_not_found() {
+        // Create a temporary directory for testing
+        let temp_dir = tempdir().unwrap();
+        let vault_directory = temp_dir.path();
+
+        // Try to read a non-existent note
+        let result = read_note_alt("Non Existent Note", vault_directory);
+
+        // Verify that the operation failed with the expected error
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_read_note_alt_with_numbers() -> Result<()> {
+        // Create a temporary directory for testing
+        let temp_dir = tempdir()?;
+        let vault_directory = temp_dir.path();
+
+        // Create multiple notes with the same base title
+        let title = "Duplicate Note";
+        create_note(title, "project", vault_directory)?;
+        let second_note_path = create_note(title, "project", vault_directory)?;
+
+        // Append some content to the second file
+        let test_content = "This is the second note.";
+        fs::write(
+            &second_note_path,
+            fs::read_to_string(&second_note_path)? + test_content,
+        )
+        .context("Failed to append content to test note")?;
+
+        // Read the note using the original title
+        // This should find the first note by default
+        let contents = read_note_alt(title, vault_directory)?;
+
+        // Verify it doesn't contain our second note content
+        assert!(!contents.contains(test_content));
+
+        // Now try to read the specific numbered note
+        let second_note_result = read_note_alt("Duplicate Note-001", vault_directory)?;
+
+        // Verify it contains our second note content
+        assert!(second_note_result.contains(test_content));
+
+        Ok(())
+    }
+
+    #[test]
+    // #[ignore] // Add this attribute to skip the test if fd is not available
+    fn test_read_note_fd() -> Result<()> {
+        // Create a temporary directory for testing
+        let temp_dir = tempdir()?;
+        let vault_directory = temp_dir.path();
+
+        // Check if fd is available
+        match Command::new("fd").arg("--version").output() {
+            Ok(_) => {} // fd is available
+            Err(_) => {
+                eprintln!("Skipping test_read_note_fd because fd command is not available");
+                return Ok(());
+            }
+        }
+
+        // Create a test note
+        let title = "Read Test Note";
+        let note_path = create_note(title, "read_test_project", vault_directory)?;
+
+        // Append some content to the file
+        let test_content = "This is some test content.";
+        fs::write(&note_path, fs::read_to_string(&note_path)? + test_content)
+            .context("Failed to append content to test note")?;
+
+        // Read the note using fd
+        let contents = read_note(title, vault_directory)?;
+
+        // Verify the contents
+        assert!(contents.contains("title: Read Test Note"));
+        assert!(contents.contains("date: "));
+        assert!(contents.contains("created_at: "));
+        assert!(contents.contains("modified_at: "));
+        assert!(contents.contains(test_content));
+
+        Ok(())
+    }
+
+    #[test]
+    // #[ignore] // Add this attribute to skip the test if fd is not available
+    fn test_read_note_fd_not_found() -> Result<()> {
+        // Create a temporary directory for testing
+        let temp_dir = tempdir()?;
+        let vault_directory = temp_dir.path();
+
+        // Check if fd is available
+        match Command::new("fd").arg("--version").output() {
+            Ok(_) => {} // fd is available
+            Err(_) => {
+                eprintln!(
+                    "Skipping test_read_note_fd_not_found because fd command is not available"
+                );
+                return Ok(());
+            }
+        }
+
+        // Try to read a non-existent note
+        let result = read_note("Non Existent Note", vault_directory);
+
+        // Verify that the operation failed with the expected error
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+
+        Ok(())
+    }
+
+    #[test]
+    // #[ignore] // Add this attribute to skip the test if fd is not available
+    fn test_read_note_fd_with_numbers() -> Result<()> {
+        // Create a temporary directory for testing
+        let temp_dir = tempdir()?;
+        let vault_directory = temp_dir.path();
+
+        // Check if fd is available
+        match Command::new("fd").arg("--version").output() {
+            Ok(_) => {} // fd is available
+            Err(_) => {
+                eprintln!(
+                    "Skipping test_read_note_fd_with_numbers because fd command is not available"
+                );
+                return Ok(());
+            }
+        }
+
+        // Create multiple notes with the same base title
+        let title = "Duplicate Note";
+        create_note(title, "project", vault_directory)?;
+        let second_note_path = create_note(title, "project", vault_directory)?;
+
+        // Append some content to the second file
+        let test_content = "This is the second note.";
+        fs::write(
+            &second_note_path,
+            fs::read_to_string(&second_note_path)? + test_content,
+        )
+        .context("Failed to append content to test note")?;
+
+        // Read the note using the original title
+        // This will find either the first or second note based on fd's sorting
+        let contents = read_note(title, vault_directory)?;
+
+        // Try to read the specific numbered note
+        let second_note_result = read_note("Duplicate Note-001", vault_directory)?;
+
+        // Verify it contains our second note content
+        assert!(second_note_result.contains(test_content));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_regex_escape() {
+        assert_eq!(regex_escape("simple"), "simple");
+        assert_eq!(regex_escape("with.dot"), "with\\.dot");
+        assert_eq!(
+            regex_escape("multiple^$.*+?()[]{}|\\chars"),
+            "multiple\\^\\$\\.\\*\\+\\?\\(\\)\\[\\]\\{\\}\\|\\\\chars"
+        );
     }
 }
