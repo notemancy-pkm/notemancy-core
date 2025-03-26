@@ -2,6 +2,9 @@
 
 use anyhow::{Context, Result, anyhow};
 use regex::Regex;
+use serde_json::{Map as JsonMap, Value as JsonValue};
+use serde_yaml;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -185,10 +188,244 @@ pub fn get_file_path_alt(title: &str, vault_directory: &Path) -> Result<PathBuf>
     Err(anyhow!("Note with title '{}' not found", title))
 }
 
+/// Parses and returns the YAML frontmatter from a markdown file as a JSON object.
+///
+/// This function searches for the file recursively in the vault directory, reads its
+/// contents, and parses any YAML frontmatter present at the beginning of the file.
+///
+/// # Arguments
+/// * `filename` - The name of the markdown file (with or without extension)
+/// * `vault_directory` - The absolute path to the vault directory
+///
+/// # Returns
+/// * `Result<JsonValue>` - The frontmatter as a JSON object on success
+///
+/// # Errors
+/// * Returns an error if the file is not found or if frontmatter parsing fails
+///
+/// # Examples
+/// ```
+/// use std::path::Path;
+/// use notemancy_core::notes::utils::get_frontmatter;
+///
+/// let vault_dir = Path::new("/path/to/vault");
+/// let frontmatter = get_frontmatter("My Note", vault_dir);
+/// // If successful, frontmatter will be a JSON object containing the parsed YAML frontmatter
+/// ```
+pub fn get_frontmatter(filename: &str, vault_directory: &Path) -> Result<JsonValue> {
+    // Find the file
+    let file_path = match get_file_path_alt(filename, vault_directory) {
+        Ok(path) => path,
+        Err(_) => {
+            // Try with .md extension if not found
+            let filename_with_ext =
+                if !filename.ends_with(".md") && !filename.ends_with(".markdown") {
+                    format!("{}.md", filename)
+                } else {
+                    filename.to_string()
+                };
+
+            let sanitized = sanitize_title(&filename_with_ext);
+            get_file_path_alt(&sanitized, vault_directory)?
+        }
+    };
+
+    // Read the file contents
+    let content = fs::read_to_string(&file_path)
+        .context(format!("Failed to read file at path: {:?}", file_path))?;
+
+    // Check if the file has frontmatter (content between --- and ---)
+    if !content.starts_with("---") {
+        // Return empty object if no frontmatter
+        return Ok(JsonValue::Object(JsonMap::new()));
+    }
+
+    // Find the end of frontmatter (the second ---)
+    let end_index = match content[3..].find("---") {
+        Some(idx) => idx + 3, // Add 3 to account for the first "---"
+        None => return Ok(JsonValue::Object(JsonMap::new())), // No closing "---"
+    };
+
+    // Extract the frontmatter content
+    let frontmatter_content = &content[3..end_index].trim();
+
+    // Parse the YAML to JSON
+    let yaml_value: serde_yaml::Value =
+        serde_yaml::from_str(frontmatter_content).context("Failed to parse YAML frontmatter")?;
+
+    // Convert YAML value to JSON value
+    let json_value = yaml_to_json(yaml_value);
+
+    Ok(json_value)
+}
+
+/// Converts serde_yaml::Value to serde_json::Value.
+fn yaml_to_json(yaml: serde_yaml::Value) -> JsonValue {
+    match yaml {
+        serde_yaml::Value::Null => JsonValue::Null,
+        serde_yaml::Value::Bool(b) => JsonValue::Bool(b),
+        serde_yaml::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                JsonValue::Number(serde_json::Number::from(i))
+            } else if let Some(f) = n.as_f64() {
+                // Use from_f64 and handle non-finite values
+                JsonValue::Number(
+                    serde_json::Number::from_f64(f).unwrap_or(serde_json::Number::from(0)),
+                )
+            } else {
+                JsonValue::Null // Fallback, should not happen
+            }
+        }
+        serde_yaml::Value::String(s) => JsonValue::String(s),
+        serde_yaml::Value::Sequence(seq) => {
+            JsonValue::Array(seq.into_iter().map(yaml_to_json).collect())
+        }
+        serde_yaml::Value::Mapping(map) => {
+            let mut json_map = JsonMap::new();
+            for (k, v) in map {
+                if let serde_yaml::Value::String(key) = k {
+                    json_map.insert(key, yaml_to_json(v));
+                } else {
+                    // Convert non-string keys to strings (JSON requires string keys)
+                    let key = match k {
+                        serde_yaml::Value::Null => "null".to_string(),
+                        serde_yaml::Value::Bool(b) => b.to_string(),
+                        serde_yaml::Value::Number(n) => n.to_string(),
+                        serde_yaml::Value::String(s) => s,
+                        serde_yaml::Value::Sequence(_) | serde_yaml::Value::Mapping(_) => {
+                            format!("{:?}", k)
+                        }
+                        _ => format!("{:?}", k),
+                    };
+                    json_map.insert(key, yaml_to_json(v));
+                }
+            }
+            JsonValue::Object(json_map)
+        }
+        _ => JsonValue::Null,
+    }
+}
+
+/// Extracts the title from a markdown file.
+///
+/// This function searches for the file recursively in the vault directory, and then:
+/// 1. If the file has YAML frontmatter with a 'title' field, returns that value
+/// 2. If no title is found in frontmatter, returns the filename without extension
+///
+/// # Arguments
+/// * `filename` - The name of the markdown file (with or without extension)
+/// * `vault_directory` - The absolute path to the vault directory
+///
+/// # Returns
+/// * `Result<String>` - The extracted title on success
+///
+/// # Errors
+/// * Returns an error if the file is not found
+///
+/// # Examples
+/// ```
+/// use std::path::Path;
+/// use notemancy_core::notes::utils::get_title;
+///
+/// let vault_dir = Path::new("/path/to/vault");
+/// let title = get_title("My-Note.md", vault_dir);
+/// // title would be either the frontmatter title or "My-Note"
+/// ```
+pub fn get_title(filename: &str, vault_directory: &Path) -> Result<String> {
+    // Try to get frontmatter
+    let frontmatter = get_frontmatter(filename, vault_directory)?;
+
+    // Check if frontmatter has a title field
+    if let JsonValue::Object(map) = &frontmatter {
+        if let Some(JsonValue::String(title)) = map.get("title") {
+            return Ok(title.clone());
+        }
+    }
+
+    // If no title in frontmatter, use filename without extension
+    let file_path = match get_file_path_alt(filename, vault_directory) {
+        Ok(path) => path,
+        Err(_) => {
+            // Try with .md extension if not found
+            let filename_with_ext =
+                if !filename.ends_with(".md") && !filename.ends_with(".markdown") {
+                    format!("{}.md", filename)
+                } else {
+                    filename.to_string()
+                };
+
+            let sanitized = sanitize_title(&filename_with_ext);
+            get_file_path_alt(&sanitized, vault_directory)?
+        }
+    };
+
+    let file_stem = file_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow!("Failed to extract filename from path"))?;
+
+    Ok(file_stem.to_string())
+}
+
+/// Returns the relative path of a file from the vault directory.
+///
+/// This function searches for the file recursively in the vault directory and
+/// returns its path relative to the vault directory without a leading slash.
+///
+/// # Arguments
+/// * `filename` - The name of the markdown file (with or without extension)
+/// * `vault_directory` - The absolute path to the vault directory
+///
+/// # Returns
+/// * `Result<String>` - The relative path as a string without leading slash
+///
+/// # Errors
+/// * Returns an error if the file is not found or if path calculation fails
+///
+/// # Examples
+/// ```
+/// use std::path::Path;
+/// use notemancy_core::notes::utils::get_relpath;
+///
+/// let vault_dir = Path::new("/path/to/vault");
+/// let rel_path = get_relpath("My Note", vault_dir);
+/// // If successful, rel_path might be something like "project/My-Note.md"
+/// ```
+pub fn get_relpath(filename: &str, vault_directory: &Path) -> Result<String> {
+    // Find the file
+    let file_path = match get_file_path_alt(filename, vault_directory) {
+        Ok(path) => path,
+        Err(_) => {
+            // Try with .md extension if not found
+            let filename_with_ext =
+                if !filename.ends_with(".md") && !filename.ends_with(".markdown") {
+                    format!("{}.md", filename)
+                } else {
+                    filename.to_string()
+                };
+
+            let sanitized = sanitize_title(&filename_with_ext);
+            get_file_path_alt(&sanitized, vault_directory)?
+        }
+    };
+
+    // Calculate relative path
+    let rel_path = file_path
+        .strip_prefix(vault_directory)
+        .context("Failed to calculate relative path")?;
+
+    // Convert to string and remove leading slash if present
+    let path_str = rel_path.to_string_lossy().to_string();
+    let path_str = path_str.trim_start_matches('/').to_string();
+
+    Ok(path_str)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::Path;
     use tempfile::tempdir;
 
     #[test]
@@ -428,5 +665,302 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    // Helper function to create a test note file with frontmatter
+    fn create_test_note_with_frontmatter(
+        dir: &Path,
+        filename: &str,
+        frontmatter: &str,
+        content: &str,
+    ) -> Result<PathBuf> {
+        let filepath = dir.join(filename);
+        let full_content = format!("---\n{}---\n\n{}", frontmatter, content);
+        fs::write(&filepath, full_content)?;
+        Ok(filepath)
+    }
+
+    #[test]
+    fn test_get_frontmatter() -> Result<()> {
+        // Create a temporary directory for testing
+        let temp_dir = tempdir()?;
+        let vault_directory = temp_dir.path();
+
+        // Create a subdirectory
+        let project_dir = vault_directory.join("project");
+        fs::create_dir_all(&project_dir)?;
+
+        // Create a test note with frontmatter
+        let frontmatter = r#"title: Test Frontmatter
+date: 2025-03-26
+tags:
+  - test
+  - frontmatter
+nested:
+  key1: value1
+  key2: 42
+  list:
+    - item1
+    - item2
+"#;
+        let content = "This is the content of the note.";
+        let _test_filepath = create_test_note_with_frontmatter(
+            &project_dir,
+            "Test-Frontmatter.md",
+            frontmatter,
+            content,
+        )?;
+
+        // Test getting frontmatter
+        let frontmatter_json = get_frontmatter("Test Frontmatter", vault_directory)?;
+
+        // Verify the frontmatter was correctly parsed
+        assert!(frontmatter_json.is_object());
+        let obj = frontmatter_json.as_object().unwrap();
+
+        // Check basic fields
+        assert_eq!(
+            obj.get("title").unwrap().as_str().unwrap(),
+            "Test Frontmatter"
+        );
+        assert_eq!(obj.get("date").unwrap().as_str().unwrap(), "2025-03-26");
+
+        // Check tags array
+        let tags = obj.get("tags").unwrap().as_array().unwrap();
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags[0].as_str().unwrap(), "test");
+        assert_eq!(tags[1].as_str().unwrap(), "frontmatter");
+
+        // Check nested object
+        let nested = obj.get("nested").unwrap().as_object().unwrap();
+        assert_eq!(nested.get("key1").unwrap().as_str().unwrap(), "value1");
+        assert_eq!(nested.get("key2").unwrap().as_i64().unwrap(), 42);
+
+        // Check nested list
+        let nested_list = nested.get("list").unwrap().as_array().unwrap();
+        assert_eq!(nested_list.len(), 2);
+        assert_eq!(nested_list[0].as_str().unwrap(), "item1");
+        assert_eq!(nested_list[1].as_str().unwrap(), "item2");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_frontmatter_no_frontmatter() -> Result<()> {
+        // Create a temporary directory for testing
+        let temp_dir = tempdir()?;
+        let vault_directory = temp_dir.path();
+
+        // Create a subdirectory
+        let project_dir = vault_directory.join("project");
+        fs::create_dir_all(&project_dir)?;
+
+        // Create a test note without frontmatter
+        let test_filepath = project_dir.join("No-Frontmatter.md");
+        fs::write(&test_filepath, "This is a note without frontmatter.")?;
+
+        // Test getting frontmatter
+        let frontmatter_json = get_frontmatter("No Frontmatter", vault_directory)?;
+
+        // Verify an empty object is returned
+        assert!(frontmatter_json.is_object());
+        assert!(frontmatter_json.as_object().unwrap().is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_frontmatter_invalid() -> Result<()> {
+        // Create a temporary directory for testing
+        let temp_dir = tempdir()?;
+        let vault_directory = temp_dir.path();
+
+        // Create a subdirectory
+        let project_dir = vault_directory.join("project");
+        fs::create_dir_all(&project_dir)?;
+
+        // Create a test note with invalid frontmatter
+        let test_filepath = project_dir.join("Invalid-Frontmatter.md");
+        fs::write(
+            &test_filepath,
+            "---\ntitle: Test\ninvalid:yaml:format\n---\n\nContent.",
+        )?;
+
+        // Test getting frontmatter (should fail)
+        let result = get_frontmatter("Invalid Frontmatter", vault_directory);
+        assert!(result.is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_title_from_frontmatter() -> Result<()> {
+        // Create a temporary directory for testing
+        let temp_dir = tempdir()?;
+        let vault_directory = temp_dir.path();
+
+        // Create a subdirectory
+        let project_dir = vault_directory.join("project");
+        fs::create_dir_all(&project_dir)?;
+
+        // Create a test note with frontmatter containing a title
+        let frontmatter = "title: Custom Title\ndate: 2025-03-26\n";
+        let content = "This is the content of the note.";
+        let _test_filepath = create_test_note_with_frontmatter(
+            &project_dir,
+            "Different-Filename.md",
+            frontmatter,
+            content,
+        )?;
+
+        // Test getting title
+        let title = get_title("Different Filename", vault_directory)?;
+
+        // Verify the title from frontmatter is returned
+        assert_eq!(title, "Custom Title");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_title_from_filename() -> Result<()> {
+        // Create a temporary directory for testing
+        let temp_dir = tempdir()?;
+        let vault_directory = temp_dir.path();
+
+        // Create a subdirectory
+        let project_dir = vault_directory.join("project");
+        fs::create_dir_all(&project_dir)?;
+
+        // Create a test note without frontmatter
+        let test_filepath = project_dir.join("Filename-Title.md");
+        fs::write(&test_filepath, "This is a note without frontmatter.")?;
+
+        // Test getting title
+        let title = get_title("Filename Title", vault_directory)?;
+
+        // Verify the filename is returned as title
+        assert_eq!(title, "Filename-Title");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_title_frontmatter_no_title() -> Result<()> {
+        // Create a temporary directory for testing
+        let temp_dir = tempdir()?;
+        let vault_directory = temp_dir.path();
+
+        // Create a subdirectory
+        let project_dir = vault_directory.join("project");
+        fs::create_dir_all(&project_dir)?;
+
+        // Create a test note with frontmatter but no title
+        let frontmatter = "date: 2025-03-26\ntags: [test]\n";
+        let content = "This is the content of the note.";
+        let _test_filepath = create_test_note_with_frontmatter(
+            &project_dir,
+            "No-Title-In-Frontmatter.md",
+            frontmatter,
+            content,
+        )?;
+
+        // Test getting title
+        let title = get_title("No Title In Frontmatter", vault_directory)?;
+
+        // Verify the filename is returned as title
+        assert_eq!(title, "No-Title-In-Frontmatter");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_relpath() -> Result<()> {
+        // Create a temporary directory for testing
+        let temp_dir = tempdir()?;
+        let vault_directory = temp_dir.path();
+
+        // Create nested subdirectories
+        let nested_dir = vault_directory.join("project/subproject/deep");
+        fs::create_dir_all(&nested_dir)?;
+
+        // Create a test note
+        let test_filepath = nested_dir.join("Deep-Note.md");
+        fs::write(&test_filepath, "This is a deeply nested note.")?;
+
+        // Test getting relative path
+        let relpath = get_relpath("Deep Note", vault_directory)?;
+
+        // Verify the relative path
+        assert_eq!(relpath, "project/subproject/deep/Deep-Note.md");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_relpath_root() -> Result<()> {
+        // Create a temporary directory for testing
+        let temp_dir = tempdir()?;
+        let vault_directory = temp_dir.path();
+
+        // Create a test note in the root directory
+        let test_filepath = vault_directory.join("Root-Note.md");
+        fs::write(&test_filepath, "This is a note in the root directory.")?;
+
+        // Test getting relative path
+        let relpath = get_relpath("Root Note", vault_directory)?;
+
+        // Verify the relative path (should not have leading slash)
+        assert_eq!(relpath, "Root-Note.md");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_yaml_to_json() {
+        // Test conversion of scalar values
+        let yaml_null = serde_yaml::Value::Null;
+        assert!(yaml_to_json(yaml_null).is_null());
+
+        let yaml_bool = serde_yaml::Value::Bool(true);
+        assert!(yaml_to_json(yaml_bool).as_bool().unwrap());
+
+        let yaml_int = serde_yaml::Value::Number(serde_yaml::Number::from(42));
+        assert_eq!(yaml_to_json(yaml_int).as_i64().unwrap(), 42);
+
+        let yaml_float = serde_yaml::Value::Number(serde_yaml::Number::from(3.14));
+        assert!(yaml_to_json(yaml_float).as_f64().unwrap() - 3.14 < 0.001);
+
+        let yaml_string = serde_yaml::Value::String("test".to_string());
+        assert_eq!(yaml_to_json(yaml_string).as_str().unwrap(), "test");
+
+        // Test conversion of sequence
+        let yaml_seq = serde_yaml::Value::Sequence(vec![
+            serde_yaml::Value::String("item1".to_string()),
+            serde_yaml::Value::Number(serde_yaml::Number::from(2)),
+        ]);
+        let json_seq = yaml_to_json(yaml_seq);
+        let json_array = json_seq.as_array().unwrap();
+        assert_eq!(json_array.len(), 2);
+        assert_eq!(json_array[0].as_str().unwrap(), "item1");
+        assert_eq!(json_array[1].as_i64().unwrap(), 2);
+
+        // Test conversion of mapping
+        let mut yaml_mapping = serde_yaml::Mapping::new();
+        yaml_mapping.insert(
+            serde_yaml::Value::String("key".to_string()),
+            serde_yaml::Value::String("value".to_string()),
+        );
+        yaml_mapping.insert(
+            serde_yaml::Value::Number(serde_yaml::Number::from(1)),
+            serde_yaml::Value::Bool(true),
+        );
+
+        let yaml_map = serde_yaml::Value::Mapping(yaml_mapping);
+        let json_map = yaml_to_json(yaml_map);
+        let json_obj = json_map.as_object().unwrap();
+
+        assert_eq!(json_obj.get("key").unwrap().as_str().unwrap(), "value");
+        assert_eq!(json_obj.get("1").unwrap().as_bool().unwrap(), true);
     }
 }
