@@ -277,6 +277,52 @@ fn update_modification_timestamp(content: &str) -> Result<String> {
     Ok(content.to_string())
 }
 
+/// Appends content to an existing markdown note.
+///
+/// # Arguments
+/// * `title` - The title of the note to append to
+/// * `vault_directory` - The base directory of the vault
+/// * `content` - The content to append to the note
+///
+/// # Returns
+/// * `Result<()>` - Ok if the content was successfully appended
+///
+/// # Errors
+/// * Returns an error if the note is not found
+/// * Returns an error if there is an issue reading or writing the file
+///
+/// # Examples
+/// ```
+/// use std::path::Path;
+/// use notemancy_core::notes::crud::append_to_note;
+///
+/// let vault_dir = Path::new("/path/to/vault");
+/// let content_to_append = "\n\n## New Section\nThis is additional content.";
+/// let result = append_to_note("My Note", vault_dir, content_to_append);
+/// ```
+pub fn append_to_note(title: &str, vault_directory: &Path, content: &str) -> Result<()> {
+    // Get the file path for the note
+    let file_path = crate::notes::utils::get_file_path(title, vault_directory)?;
+
+    // Read the current content of the file
+    let current_content = fs::read_to_string(&file_path)
+        .context(format!("Failed to read note file: {}", file_path))?;
+
+    // Create the new content by appending the provided content
+    let new_content = format!("{}{}", current_content, content);
+
+    // Update the modification timestamp in the frontmatter
+    let new_content = update_modification_timestamp(&new_content)?;
+
+    // Write the updated content to the file
+    fs::write(&file_path, new_content).context(format!(
+        "Failed to write updated content to file: {}",
+        file_path
+    ))?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -713,6 +759,67 @@ End of note.
 
         // Verify that an error was returned
         assert!(result.is_err(), "Updating a non-existent note should fail");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_append_to_note() -> Result<()> {
+        // Create a temporary directory for the test vault
+        let temp_dir = tempdir()?;
+        let vault_dir = temp_dir.path();
+
+        // Create a test note
+        let title = "Append Test Note";
+        let note_path = create_note(title, vault_dir, "test")?;
+
+        // Initial content should only have frontmatter
+        let initial_content = fs::read_to_string(&note_path)?;
+        assert!(initial_content.contains("---\ntitle: Append Test Note"));
+        assert!(!initial_content.contains("Initial content"));
+
+        // Append content to the note
+        let content_to_append = "# Initial content\nThis is the first append.";
+        append_to_note(title, vault_dir, content_to_append)?;
+
+        // Verify content was appended
+        let updated_content = fs::read_to_string(&note_path)?;
+        assert!(updated_content.contains("---\ntitle: Append Test Note"));
+        assert!(updated_content.contains("# Initial content"));
+        assert!(updated_content.contains("This is the first append."));
+
+        // Append more content
+        let more_content = "\n\n## Second section\nThis is the second append.";
+        append_to_note(title, vault_dir, more_content)?;
+
+        // Verify all content is present
+        let final_content = fs::read_to_string(&note_path)?;
+        assert!(final_content.contains("---\ntitle: Append Test Note"));
+        assert!(final_content.contains("# Initial content"));
+        assert!(final_content.contains("This is the first append."));
+        assert!(final_content.contains("## Second section"));
+        assert!(final_content.contains("This is the second append."));
+
+        // Verify modification timestamp was updated
+        assert!(final_content.contains("modified_at:"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_append_to_nonexistent_note() -> Result<()> {
+        // Create a temporary directory for the test vault
+        let temp_dir = tempdir()?;
+        let vault_dir = temp_dir.path();
+
+        // Try to append to a non-existent note
+        let result = append_to_note("Non Existent Note", vault_dir, "Some content");
+
+        // Verify that an error was returned
+        assert!(
+            result.is_err(),
+            "Appending to a non-existent note should fail"
+        );
 
         Ok(())
     }
