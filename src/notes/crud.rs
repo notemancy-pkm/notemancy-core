@@ -63,6 +63,84 @@ pub fn create_note(title: &str, vault_directory: &Path, project: &str) -> Result
     Ok(note_path)
 }
 
+/// Reads a markdown note with the given title from the vault directory.
+///
+/// # Arguments
+/// * `title` - The title of the note to read
+/// * `vault_directory` - The base directory of the vault
+/// * `frontmatter` - Whether to include frontmatter in the returned content (true)
+///                   or strip it (false/None)
+///
+/// # Returns
+/// * `Result<String>` - The content of the note, with or without frontmatter
+///
+/// # Errors
+/// * Returns an error if the note is not found
+/// * Returns an error if there is an issue reading the file
+///
+/// # Examples
+/// ```
+/// use std::path::Path;
+/// use notemancy_core::notes::crud::read_note;
+///
+/// let vault_dir = Path::new("/path/to/vault");
+///
+/// // Read note with frontmatter
+/// let content_with_frontmatter = read_note("My Note", vault_dir, true);
+///
+/// // Read note without frontmatter
+/// let content_without_frontmatter = read_note("My Note", vault_dir, false);
+/// ```
+pub fn read_note(title: &str, vault_directory: &Path, frontmatter: bool) -> Result<String> {
+    // Get the file path for the note
+    let file_path = crate::notes::utils::get_file_path(title, vault_directory)?;
+
+    // Read the content of the file
+    let content = fs::read_to_string(&file_path)
+        .context(format!("Failed to read note file: {}", file_path))?;
+
+    if frontmatter {
+        // Return the entire content if frontmatter is required
+        Ok(content)
+    } else {
+        // Strip frontmatter if present and return only the content
+        strip_frontmatter(&content)
+    }
+}
+
+/// Helper function to strip YAML frontmatter from markdown content.
+///
+/// Frontmatter is expected to start and end with "---" on its own line.
+/// If no frontmatter is detected, the original content is returned unchanged.
+fn strip_frontmatter(content: &str) -> Result<String> {
+    // Check if the content starts with frontmatter delimiter
+    if content.trim_start().starts_with("---") {
+        // Find the end of the frontmatter (second occurrence of "---")
+        let start_pos = content.find("---").unwrap(); // Safe because we checked it starts with ---
+        let from_first_delimiter = &content[start_pos + 3..]; // Skip past first "---"
+
+        if let Some(second_delimiter_pos) = from_first_delimiter.find("---") {
+            // Calculate the absolute position of the second delimiter in the original string
+            let end_pos = start_pos + 3 + second_delimiter_pos;
+
+            // Find the next newline after the second "---"
+            if let Some(newline_pos) = content[end_pos..].find('\n') {
+                let content_start = end_pos + newline_pos + 1;
+                return Ok(content[content_start..].trim_start().to_string());
+            } else {
+                // No content after frontmatter
+                return Ok(String::new());
+            }
+        } else {
+            // Could not find second delimiter, return original content
+            return Ok(content.to_string());
+        }
+    } else {
+        // No frontmatter, return the original content
+        Ok(content.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,6 +262,158 @@ mod tests {
                 "Error message should mention duplicate title"
             );
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_strip_frontmatter() -> Result<()> {
+        // Test with valid frontmatter
+        let content =
+            "---\ntitle: Test Note\ncreated_on: 2023-01-01\n---\n\nThis is the note content.";
+        let stripped = strip_frontmatter(content)?;
+        assert_eq!(stripped, "This is the note content.");
+
+        // Test with no frontmatter
+        let content_no_frontmatter = "This is a note without frontmatter.";
+        let stripped = strip_frontmatter(content_no_frontmatter)?;
+        assert_eq!(stripped, content_no_frontmatter);
+
+        // Test with only frontmatter start delimiter
+        let content_incomplete = "---\ntitle: Incomplete\n\nContent after incomplete frontmatter.";
+        let stripped = strip_frontmatter(content_incomplete)?;
+        assert_eq!(stripped, content_incomplete);
+
+        // Test with leading whitespace before frontmatter
+        let content_with_leading_whitespace = "  \n\n---\ntitle: Test\n---\n\nContent.";
+        let stripped = strip_frontmatter(content_with_leading_whitespace)?;
+        assert_eq!(stripped, "Content.");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_note_with_frontmatter() -> Result<()> {
+        // Create a temporary directory for the test vault
+        let temp_dir = tempdir()?;
+        let vault_dir = temp_dir.path();
+
+        // Create a test note
+        let title = "Read Test Note";
+        let _note_path = create_note(title, vault_dir, "test")?;
+
+        // Read the note with frontmatter
+        let content = read_note(title, vault_dir, true)?;
+
+        // Verify the content includes frontmatter
+        assert!(
+            content.contains("---"),
+            "Content should include frontmatter delimiters"
+        );
+        assert!(
+            content.contains("title: Read Test Note"),
+            "Content should include title in frontmatter"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_note_without_frontmatter() -> Result<()> {
+        // Create a temporary directory for the test vault
+        let temp_dir = tempdir()?;
+        let vault_dir = temp_dir.path();
+
+        // Create a test note
+        let title = "Read Test Note";
+        let note_path = create_note(title, vault_dir, "test")?;
+
+        // Add some content after the frontmatter
+        let original_content = fs::read_to_string(&note_path)?;
+        let new_content = format!("{}This is the actual note content.", original_content);
+        fs::write(&note_path, new_content)?;
+
+        // Read the note without frontmatter
+        let content = read_note(title, vault_dir, false)?;
+
+        // Verify the content excludes frontmatter
+        assert!(
+            !content.contains("---"),
+            "Content should not include frontmatter delimiters"
+        );
+        assert!(
+            !content.contains("title:"),
+            "Content should not include frontmatter fields"
+        );
+        assert!(
+            content.contains("This is the actual note content."),
+            "Content should include the actual note"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_note_not_found() -> Result<()> {
+        // Create a temporary directory for the test vault
+        let temp_dir = tempdir()?;
+        let vault_dir = temp_dir.path();
+
+        // Try to read a non-existent note
+        let result = read_note("Non Existent Note", vault_dir, true);
+
+        // Verify that an error was returned
+        assert!(result.is_err(), "Reading a non-existent note should fail");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_note_with_modified_content() -> Result<()> {
+        // Create a temporary directory for the test vault
+        let temp_dir = tempdir()?;
+        let vault_dir = temp_dir.path();
+
+        // Create a test note with complex content
+        let title = "Complex Content Note";
+        let note_path = create_note(title, vault_dir, "test")?;
+
+        // Create more complex content with multiple frontmatter-like sections
+        let complex_content = r#"---
+title: Complex Content Note
+created_on: 2023-01-01
+tags:
+  - test
+  - example
+---
+
+# Main Content
+
+This is the main content of the note.
+
+## Code Example
+More text after the code block.
+
+---
+
+This is a horizontal rule, not a frontmatter delimiter.
+
+---
+
+End of note.
+"#;
+
+        fs::write(&note_path, complex_content)?;
+
+        // Read with frontmatter
+        let with_frontmatter = read_note(title, vault_dir, true)?;
+        assert_eq!(with_frontmatter, complex_content);
+
+        // Read without frontmatter
+        let without_frontmatter = read_note(title, vault_dir, false)?;
+        assert!(!without_frontmatter.contains("title: Complex Content Note"));
+        assert!(without_frontmatter.contains("# Main Content"));
+        assert!(without_frontmatter.contains("This is a horizontal rule"));
 
         Ok(())
     }
