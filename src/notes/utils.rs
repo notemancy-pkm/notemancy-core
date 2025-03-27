@@ -283,6 +283,73 @@ pub fn check_unique_title(title: &str, vault_directory: &Path) -> Result<bool> {
     Ok(true)
 }
 
+/// Gets the absolute file path for a markdown file with the given title using fd.
+///
+/// This function sanitizes the input title and searches for a file with that name
+/// (with .md or .markdown extension) in the vault directory using the fd command.
+///
+/// # Arguments
+/// * `title` - The title to search for
+/// * `vault_directory` - The absolute path to the vault directory
+///
+/// # Returns
+/// * `Result<String>` - The absolute path to the file if found
+///
+/// # Errors
+/// * Returns an error if the fd command fails or if no matching file is found
+///
+/// # Examples
+/// ```
+/// use std::path::Path;
+/// use notemancy_core::notes::utils::get_file_path;
+///
+/// let vault_dir = Path::new("/path/to/vault");
+/// // Get the absolute path of a note with title "My Note"
+/// let file_path = get_file_path("My Note", vault_dir);
+/// ```
+pub fn get_file_path(title: &str, vault_directory: &Path) -> Result<String> {
+    // Sanitize the title
+    let sanitized_title = sanitize_title(title);
+
+    // Create pattern to match either .md or .markdown extensions
+    let pattern = format!("^{}\\.(md|markdown)$", regex_escape(&sanitized_title));
+
+    // Execute fd command to find the file
+    let output = Command::new("fd")
+        .args(&[
+            &pattern,
+            vault_directory.to_str().unwrap_or("."),
+            "--type",
+            "f", // Only find files
+        ])
+        .output()
+        .context("Failed to execute fd command")?;
+
+    if !output.status.success() {
+        return Err(anyhow!(
+            "fd command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    // Get the output as a string
+    let stdout = String::from_utf8(output.stdout).context("Failed to parse fd command output")?;
+
+    // Split by newlines and get the first match (if any)
+    let file_paths: Vec<&str> = stdout
+        .trim()
+        .split('\n')
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if file_paths.is_empty() {
+        Err(anyhow!("No markdown file found with title: {}", title))
+    } else {
+        // Return the first match
+        Ok(file_paths[0].to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,6 +561,82 @@ mod tests {
         assert!(
             !is_unique,
             "Expected title 'Existing.Note' to not be unique after sanitization"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_file_path() -> Result<()> {
+        // Check if fd is available
+        match Command::new("fd").arg("--version").output() {
+            Ok(_) => {} // fd is available
+            Err(_) => {
+                eprintln!("Skipping test_get_file_path because fd command is not available");
+                return Ok(());
+            }
+        }
+
+        // Create a temporary directory for testing
+        let temp_dir = tempdir()?;
+        let vault_directory = temp_dir.path();
+
+        // Create test directories
+        let project1_dir = vault_directory.join("project1");
+        let project2_dir = vault_directory.join("project2");
+        fs::create_dir_all(&project1_dir)?;
+        fs::create_dir_all(&project2_dir)?;
+
+        // Create test markdown files
+        let test_file1 = project1_dir.join("My-Note.md");
+        let test_file2 = project1_dir.join("Another-Note.markdown");
+        let test_file3 = project2_dir.join("Special-Note.md");
+        fs::write(&test_file1, "content1")?;
+        fs::write(&test_file2, "content2")?;
+        fs::write(&test_file3, "content3")?;
+
+        // Create a non-markdown file (should be ignored)
+        let non_md_file = project1_dir.join("document.txt");
+        fs::write(&non_md_file, "not a markdown file")?;
+
+        // Test finding a file with exact title
+        let file_path = get_file_path("My Note", vault_directory);
+        assert!(
+            file_path.is_ok(),
+            "Should find the file with title 'My Note'"
+        );
+        let file_path = file_path?;
+        assert!(file_path.contains("My-Note.md"), "Should find My-Note.md");
+
+        // Test finding a file with title that needs sanitization
+        let file_path = get_file_path("Another.Note", vault_directory);
+        assert!(
+            file_path.is_ok(),
+            "Should find the file with sanitized title 'Another-Note'"
+        );
+        let file_path = file_path?;
+        assert!(
+            file_path.contains("Another-Note.markdown"),
+            "Should find Another-Note.markdown"
+        );
+
+        // Test finding a file in a subdirectory
+        let file_path = get_file_path("Special Note", vault_directory);
+        assert!(
+            file_path.is_ok(),
+            "Should find the file with title 'Special Note'"
+        );
+        let file_path = file_path?;
+        assert!(
+            file_path.contains("Special-Note.md"),
+            "Should find Special-Note.md"
+        );
+
+        // Test with a title that doesn't exist
+        let file_path = get_file_path("Non Existent Note", vault_directory);
+        assert!(
+            file_path.is_err(),
+            "Should not find a file with title 'Non Existent Note'"
         );
 
         Ok(())
