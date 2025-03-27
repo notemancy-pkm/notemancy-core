@@ -4,7 +4,7 @@ use anyhow::{Context, Result, anyhow};
 use regex::Regex;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use serde_yaml;
-// use std::fs;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -350,6 +350,79 @@ pub fn get_file_path(title: &str, vault_directory: &Path) -> Result<String> {
     }
 }
 
+/// Extracts the title from a markdown file.
+///
+/// This function attempts to find the title from:
+/// 1. The 'title' field in the YAML frontmatter if it exists
+/// 2. Falls back to using the filename (without extension) if no frontmatter title is found
+///
+/// # Arguments
+/// * `file_path` - Path to the markdown file
+///
+/// # Returns
+/// * `Result<String>` - The extracted title
+///
+/// # Errors
+/// * Returns an error if the file cannot be read
+///
+/// # Examples
+/// ```
+/// use std::path::Path;
+/// use notemancy_core::notes::utils::get_title;
+///
+/// let file_path = Path::new("/path/to/vault/My-Note.md");
+/// let title = get_title(file_path);
+/// ```
+pub fn get_title(file_path: &Path) -> Result<String> {
+    // Read the file content
+    let content = fs::read_to_string(file_path)
+        .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
+
+    // Try to extract title from frontmatter
+    if let Some(title) = extract_frontmatter_title(&content) {
+        return Ok(title);
+    }
+
+    // Fall back to using the filename without extension
+    if let Some(file_stem) = file_path.file_stem() {
+        if let Some(file_stem_str) = file_stem.to_str() {
+            // Convert hyphens back to spaces for a more natural title
+            let title = file_stem_str.replace('-', " ");
+            return Ok(title);
+        }
+    }
+
+    // If even the filename can't be used, return an error
+    Err(anyhow!(
+        "Could not determine title for file: {}",
+        file_path.display()
+    ))
+}
+
+/// Helper function to extract title from YAML frontmatter.
+fn extract_frontmatter_title(content: &str) -> Option<String> {
+    // Check if the content starts with YAML frontmatter (---)
+    if !content.starts_with("---") {
+        return None;
+    }
+
+    // Find the end of frontmatter
+    let end_marker = content[3..].find("---")?;
+    let frontmatter = &content[3..3 + end_marker];
+
+    // Look for a line starting with "title:" in the frontmatter
+    for line in frontmatter.lines() {
+        let line = line.trim();
+        if line.starts_with("title:") {
+            // Extract the title value (everything after "title:")
+            let title = line[6..].trim().to_string();
+            return Some(title);
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -638,6 +711,66 @@ mod tests {
             file_path.is_err(),
             "Should not find a file with title 'Non Existent Note'"
         );
+
+        Ok(())
+    }
+    #[test]
+    fn test_get_title_from_frontmatter() -> Result<()> {
+        // Create a temporary file with frontmatter
+        let temp_dir = tempdir()?;
+        let file_path = temp_dir.path().join("Test-Note.md");
+
+        let content = r#"---
+title: Custom Frontmatter Title
+created_on: 2023-05-15
+modified_at: 2023-05-15 10:30:45
+---
+
+This is the content of the note."#;
+
+        fs::write(&file_path, content)?;
+
+        // Test getting title from frontmatter
+        let title = get_title(&file_path)?;
+        assert_eq!(title, "Custom Frontmatter Title");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_title_from_filename() -> Result<()> {
+        // Create a temporary file without frontmatter
+        let temp_dir = tempdir()?;
+        let file_path = temp_dir.path().join("Filename-Based-Title.md");
+
+        let content = "This note has no frontmatter, so the title should come from the filename.";
+        fs::write(&file_path, content)?;
+
+        // Test getting title from filename
+        let title = get_title(&file_path)?;
+        assert_eq!(title, "Filename Based Title");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_title_malformed_frontmatter() -> Result<()> {
+        // Create a temporary file with malformed frontmatter (missing title)
+        let temp_dir = tempdir()?;
+        let file_path = temp_dir.path().join("Malformed-Frontmatter.md");
+
+        let content = r#"---
+created_on: 2023-05-15
+modified_at: 2023-05-15 10:30:45
+---
+
+This frontmatter has no title field."#;
+
+        fs::write(&file_path, content)?;
+
+        // Test falling back to filename when frontmatter has no title
+        let title = get_title(&file_path)?;
+        assert_eq!(title, "Malformed Frontmatter");
 
         Ok(())
     }
