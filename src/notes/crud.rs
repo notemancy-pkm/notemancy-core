@@ -141,6 +141,142 @@ fn strip_frontmatter(content: &str) -> Result<String> {
     }
 }
 
+/// Updates a markdown note with new content while preserving the frontmatter.
+///
+/// # Arguments
+/// * `title` - The title of the note to update
+/// * `vault_directory` - The base directory of the vault
+/// * `updated_content` - The new content to write to the note (without frontmatter)
+///
+/// # Returns
+/// * `Result<()>` - Ok if the note was successfully updated
+///
+/// # Errors
+/// * Returns an error if the note is not found
+/// * Returns an error if there is an issue reading or writing the file
+///
+/// # Examples
+/// ```
+/// use std::path::Path;
+/// use notemancy_core::notes::crud::update_note;
+///
+/// let vault_dir = Path::new("/path/to/vault");
+/// let new_content = "# Updated Content\n\nThis is the new content of the note.";
+/// let result = update_note("My Note", vault_dir, new_content);
+/// ```
+pub fn update_note(title: &str, vault_directory: &Path, updated_content: &str) -> Result<()> {
+    // Get the file path for the note
+    let file_path = crate::notes::utils::get_file_path(title, vault_directory)?;
+
+    // Read the current content of the file
+    let current_content = fs::read_to_string(&file_path)
+        .context(format!("Failed to read note file: {}", file_path))?;
+
+    // Extract the frontmatter if it exists
+    let frontmatter = extract_frontmatter(&current_content)?;
+
+    // Combine frontmatter with updated content
+    let new_content = if let Some(frontmatter) = frontmatter {
+        format!("{}\n\n{}", frontmatter, updated_content.trim())
+    } else {
+        // If no frontmatter exists, use the updated content as is
+        updated_content.to_string()
+    };
+
+    // Update the modification timestamp in the frontmatter if it exists
+    let new_content = update_modification_timestamp(&new_content)?;
+
+    // Write the new content to the file
+    fs::write(&file_path, new_content).context(format!(
+        "Failed to write updated content to file: {}",
+        file_path
+    ))?;
+
+    Ok(())
+}
+
+/// Deletes a markdown note with the given title from the vault directory.
+///
+/// # Arguments
+/// * `title` - The title of the note to delete
+/// * `vault_directory` - The base directory of the vault
+///
+/// # Returns
+/// * `Result<()>` - Ok if the note was successfully deleted
+///
+/// # Errors
+/// * Returns an error if the note is not found
+/// * Returns an error if there is an issue deleting the file
+///
+/// # Examples
+/// ```
+/// use std::path::Path;
+/// use notemancy_core::notes::crud::delete_note;
+///
+/// let vault_dir = Path::new("/path/to/vault");
+/// let result = delete_note("My Note", vault_dir);
+/// ```
+pub fn delete_note(title: &str, vault_directory: &Path) -> Result<()> {
+    // Get the file path for the note
+    let file_path = crate::notes::utils::get_file_path(title, vault_directory)?;
+
+    // Delete the file
+    fs::remove_file(&file_path).context(format!("Failed to delete note file: {}", file_path))?;
+
+    Ok(())
+}
+
+/// Helper function to extract frontmatter from content.
+///
+/// Returns Some(frontmatter) if frontmatter exists, None otherwise.
+fn extract_frontmatter(content: &str) -> Result<Option<String>> {
+    let trimmed = content.trim_start();
+
+    // Check if content starts with frontmatter delimiter
+    if trimmed.starts_with("---") {
+        let start_pos = content.find("---").unwrap(); // Safe because we checked it starts with ---
+        let from_first_delimiter = &content[start_pos + 3..]; // Skip past first "---"
+
+        if let Some(second_delimiter_pos) = from_first_delimiter.find("---") {
+            // Calculate the absolute position of the second delimiter in the original string
+            let end_pos = start_pos + 3 + second_delimiter_pos + 3; // +3 to include the second delimiter
+
+            // Extract the frontmatter including both delimiters
+            let frontmatter = content[start_pos..end_pos].to_string();
+            return Ok(Some(frontmatter));
+        }
+    }
+
+    // No frontmatter found
+    Ok(None)
+}
+
+/// Helper function to update the modification timestamp in frontmatter.
+fn update_modification_timestamp(content: &str) -> Result<String> {
+    let now = chrono::Local::now();
+    let timestamp_str = now.format("%Y-%m-%d %H:%M:%S").to_string();
+
+    // Check if content has frontmatter
+    if let Some(frontmatter) = extract_frontmatter(content)? {
+        // Check if frontmatter contains a modified_at field
+        if frontmatter.contains("modified_at:") {
+            // Use regex to replace the modified_at field value
+            let re = regex::Regex::new(r"modified_at:.*(\r?\n|\r)")
+                .context("Failed to create regex pattern")?;
+            let updated = re.replace(content, &format!("modified_at: {}\n", timestamp_str));
+            return Ok(updated.to_string());
+        } else {
+            // Add modified_at field at the end of frontmatter
+            let before_second_delimiter = content.rfind("---").unwrap();
+            let (start, end) = content.split_at(before_second_delimiter);
+            return Ok(format!("{}modified_at: {}\n{}", start, timestamp_str, end));
+        }
+    }
+
+    // No frontmatter or no modified_at field, return original content
+    Ok(content.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,6 +550,169 @@ End of note.
         assert!(!without_frontmatter.contains("title: Complex Content Note"));
         assert!(without_frontmatter.contains("# Main Content"));
         assert!(without_frontmatter.contains("This is a horizontal rule"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_extract_frontmatter() -> Result<()> {
+        // Test with valid frontmatter
+        let content =
+            "---\ntitle: Test Note\ncreated_on: 2023-01-01\n---\n\nThis is the note content.";
+        let frontmatter = extract_frontmatter(content)?;
+        assert!(frontmatter.is_some());
+        assert_eq!(
+            frontmatter.unwrap(),
+            "---\ntitle: Test Note\ncreated_on: 2023-01-01\n---"
+        );
+
+        // Test with no frontmatter
+        let content_no_frontmatter = "This is a note without frontmatter.";
+        let frontmatter = extract_frontmatter(content_no_frontmatter)?;
+        assert!(frontmatter.is_none());
+
+        // Test with only frontmatter start delimiter
+        let content_incomplete = "---\ntitle: Incomplete\n\nContent after incomplete frontmatter.";
+        let frontmatter = extract_frontmatter(content_incomplete)?;
+        assert!(frontmatter.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_modification_timestamp() -> Result<()> {
+        // Test updating existing timestamp
+        let content = "---\ntitle: Test Note\ncreated_on: 2023-01-01\nmodified_at: 2023-01-01 12:00:00\n---\n\nContent.";
+        let updated = update_modification_timestamp(content)?;
+        assert!(updated.contains("modified_at: "));
+        assert!(!updated.contains("modified_at: 2023-01-01 12:00:00"));
+
+        // Test adding timestamp when it doesn't exist
+        let content_no_timestamp = "---\ntitle: Test Note\ncreated_on: 2023-01-01\n---\n\nContent.";
+        let updated = update_modification_timestamp(content_no_timestamp)?;
+        assert!(updated.contains("modified_at: "));
+
+        // Test with no frontmatter
+        let content_no_frontmatter = "This is a note without frontmatter.";
+        let updated = update_modification_timestamp(content_no_frontmatter)?;
+        assert_eq!(updated, content_no_frontmatter);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_note() -> Result<()> {
+        // Create a temporary directory for the test vault
+        let temp_dir = tempdir()?;
+        let vault_dir = temp_dir.path();
+
+        // Create a test note
+        let title = "Update Test Note";
+        let note_path = create_note(title, vault_dir, "test")?;
+
+        // Initial content
+        let initial_content = fs::read_to_string(&note_path)?;
+        assert!(initial_content.contains("---\ntitle: Update Test Note"));
+
+        // Update the note with new content
+        let new_content = "# Updated Content\n\nThis is the updated content.";
+        update_note(title, vault_dir, new_content)?;
+
+        // Verify the note was updated correctly
+        let updated_content = fs::read_to_string(&note_path)?;
+        assert!(updated_content.contains("---\ntitle: Update Test Note"));
+        assert!(updated_content.contains("# Updated Content"));
+        assert!(updated_content.contains("This is the updated content."));
+
+        // Verify the timestamp was updated
+        assert!(updated_content.contains("modified_at: "));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_note_preserves_frontmatter() -> Result<()> {
+        // Create a temporary directory for the test vault
+        let temp_dir = tempdir()?;
+        let vault_dir = temp_dir.path();
+
+        // Create a test note with custom frontmatter
+        let title = "Frontmatter Preservation Test";
+        let note_path = create_note(title, vault_dir, "test")?;
+
+        // Add custom fields to frontmatter
+        let custom_frontmatter = format!(
+            "---\ntitle: {}\ncreated_on: 2023-01-01\ntags:\n  - test\n  - example\npriority: high\n---\n\nInitial content.",
+            title
+        );
+        fs::write(&note_path, custom_frontmatter)?;
+
+        // Update the note
+        let new_content = "This content should replace only what comes after frontmatter.";
+        update_note(title, vault_dir, new_content)?;
+
+        // Verify frontmatter is preserved
+        let updated_content = fs::read_to_string(&note_path)?;
+        assert!(updated_content.contains("tags:"));
+        assert!(updated_content.contains("- test"));
+        assert!(updated_content.contains("- example"));
+        assert!(updated_content.contains("priority: high"));
+
+        // Verify content is updated
+        assert!(updated_content.contains(new_content));
+        assert!(!updated_content.contains("Initial content."));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_delete_note() -> Result<()> {
+        // Create a temporary directory for the test vault
+        let temp_dir = tempdir()?;
+        let vault_dir = temp_dir.path();
+
+        // Create a test note
+        let title = "Delete Test Note";
+        let note_path = create_note(title, vault_dir, "test")?;
+
+        // Verify the note exists
+        assert!(note_path.exists(), "Note should exist before deletion");
+
+        // Delete the note
+        delete_note(title, vault_dir)?;
+
+        // Verify the note no longer exists
+        assert!(!note_path.exists(), "Note should not exist after deletion");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_delete_note_not_found() -> Result<()> {
+        // Create a temporary directory for the test vault
+        let temp_dir = tempdir()?;
+        let vault_dir = temp_dir.path();
+
+        // Try to delete a non-existent note
+        let result = delete_note("Non Existent Note", vault_dir);
+
+        // Verify that an error was returned
+        assert!(result.is_err(), "Deleting a non-existent note should fail");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_note_not_found() -> Result<()> {
+        // Create a temporary directory for the test vault
+        let temp_dir = tempdir()?;
+        let vault_dir = temp_dir.path();
+
+        // Try to update a non-existent note
+        let result = update_note("Non Existent Note", vault_dir, "Updated content");
+
+        // Verify that an error was returned
+        assert!(result.is_err(), "Updating a non-existent note should fail");
 
         Ok(())
     }
