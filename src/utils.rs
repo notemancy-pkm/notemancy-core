@@ -41,7 +41,7 @@ pub fn get_vault_directory(vault_name: &str, config_dir: &Path) -> Result<PathBu
         for vault in vaults {
             if let Some(name) = vault.get("name") {
                 if name.as_str() == Some(vault_name) {
-                    if let Some(path) = vault.get("path") {
+                    if let Some(path) = vault.get("vault_directory") {
                         if let Some(path_str) = path.as_str() {
                             return Ok(PathBuf::from(path_str));
                         }
@@ -281,9 +281,9 @@ mod tests {
         default_vault: vault1
         vaults:
           - name: vault1
-            path: /path/to/vault1
+            vault_directory: /path/to/vault1
           - name: vault2
-            path: /path/to/vault2
+            vault_directory: /path/to/vault2
         "#;
 
         let config_path = config_dir.join("config.yaml");
@@ -311,9 +311,9 @@ mod tests {
         default_vault: vault1
         vaults:
           - name: vault1
-            path: /path/to/vault1
+            vault_directory: /path/to/vault1
           - name: vault2
-            path: /path/to/vault2
+            vault_directory: /path/to/vault2
         "#;
 
         let config_path = config_dir.join("config.yaml");

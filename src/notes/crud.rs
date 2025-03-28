@@ -63,20 +63,19 @@ pub fn create_note(title: &str, vault_directory: &Path, project: &str) -> Result
     Ok(note_path)
 }
 
-/// Reads a markdown note with the given title from the vault directory.
+/// Reads a markdown note from the specified relative path in the vault directory.
 ///
 /// # Arguments
-/// * `title` - The title of the note to read
+/// * `relative_path` - The relative path to the note within the vault directory
 /// * `vault_directory` - The base directory of the vault
 /// * `frontmatter` - Whether to include frontmatter in the returned content (true)
-///                   or strip it (false/None)
+///                   or strip it (false)
 ///
 /// # Returns
 /// * `Result<String>` - The content of the note, with or without frontmatter
 ///
 /// # Errors
-/// * Returns an error if the note is not found
-/// * Returns an error if there is an issue reading the file
+/// * Returns an error if the note file can't be found or read
 ///
 /// # Examples
 /// ```
@@ -86,18 +85,18 @@ pub fn create_note(title: &str, vault_directory: &Path, project: &str) -> Result
 /// let vault_dir = Path::new("/path/to/vault");
 ///
 /// // Read note with frontmatter
-/// let content_with_frontmatter = read_note("My Note", vault_dir, true);
+/// let content_with_frontmatter = read_note("notes/my-note.md", vault_dir, true);
 ///
 /// // Read note without frontmatter
-/// let content_without_frontmatter = read_note("My Note", vault_dir, false);
+/// let content_without_frontmatter = read_note("notes/my-note.md", vault_dir, false);
 /// ```
-pub fn read_note(title: &str, vault_directory: &Path, frontmatter: bool) -> Result<String> {
-    // Get the file path for the note
-    let file_path = crate::notes::utils::get_file_path(title, vault_directory)?;
+pub fn read_note(relative_path: &str, vault_directory: &Path, frontmatter: bool) -> Result<String> {
+    // Join the relative path to the vault directory to get the full file path
+    let file_path = vault_directory.join(relative_path);
 
     // Read the content of the file
     let content = fs::read_to_string(&file_path)
-        .context(format!("Failed to read note file: {}", file_path))?;
+        .context(format!("Failed to read note file: {}", file_path.display()))?;
 
     if frontmatter {
         // Return the entire content if frontmatter is required
@@ -480,14 +479,26 @@ mod tests {
         let temp_dir = tempdir()?;
         let vault_dir = temp_dir.path();
 
+        // Create a test project directory
+        let project_dir = "test";
+        let full_project_path = vault_dir.join(project_dir);
+        fs::create_dir_all(&full_project_path)?;
+
         // Create a test note
-        let title = "Read Test Note";
-        let _note_path = create_note(title, vault_dir, "test")?;
+        let filename = "Read-Test-Note.md";
+        let relative_path = format!("{}/{}", project_dir, filename);
+        let full_path = vault_dir.join(&relative_path);
+
+        // Write test content with frontmatter
+        let test_content =
+            "---\ntitle: Read Test Note\ncreated_on: 2023-01-01\n---\n\nThis is the note content.";
+        fs::write(&full_path, test_content)?;
 
         // Read the note with frontmatter
-        let content = read_note(title, vault_dir, true)?;
+        let content = read_note(&relative_path, vault_dir, true)?;
 
         // Verify the content includes frontmatter
+        assert_eq!(content, test_content);
         assert!(
             content.contains("---"),
             "Content should include frontmatter delimiters"
@@ -506,19 +517,26 @@ mod tests {
         let temp_dir = tempdir()?;
         let vault_dir = temp_dir.path();
 
-        // Create a test note
-        let title = "Read Test Note";
-        let note_path = create_note(title, vault_dir, "test")?;
+        // Create a test project directory
+        let project_dir = "test";
+        let full_project_path = vault_dir.join(project_dir);
+        fs::create_dir_all(&full_project_path)?;
 
-        // Add some content after the frontmatter
-        let original_content = fs::read_to_string(&note_path)?;
-        let new_content = format!("{}This is the actual note content.", original_content);
-        fs::write(&note_path, new_content)?;
+        // Create a test note
+        let filename = "Read-Test-Note.md";
+        let relative_path = format!("{}/{}", project_dir, filename);
+        let full_path = vault_dir.join(&relative_path);
+
+        // Write test content with frontmatter
+        let test_content =
+            "---\ntitle: Read Test Note\ncreated_on: 2023-01-01\n---\n\nThis is the note content.";
+        fs::write(&full_path, test_content)?;
 
         // Read the note without frontmatter
-        let content = read_note(title, vault_dir, false)?;
+        let content = read_note(&relative_path, vault_dir, false)?;
 
         // Verify the content excludes frontmatter
+        assert_eq!(content, "This is the note content.");
         assert!(
             !content.contains("---"),
             "Content should not include frontmatter delimiters"
@@ -526,10 +544,6 @@ mod tests {
         assert!(
             !content.contains("title:"),
             "Content should not include frontmatter fields"
-        );
-        assert!(
-            content.contains("This is the actual note content."),
-            "Content should include the actual note"
         );
 
         Ok(())
@@ -542,7 +556,7 @@ mod tests {
         let vault_dir = temp_dir.path();
 
         // Try to read a non-existent note
-        let result = read_note("Non Existent Note", vault_dir, true);
+        let result = read_note("non-existent/note.md", vault_dir, true);
 
         // Verify that an error was returned
         assert!(result.is_err(), "Reading a non-existent note should fail");
@@ -551,14 +565,20 @@ mod tests {
     }
 
     #[test]
-    fn test_read_note_with_modified_content() -> Result<()> {
+    fn test_read_note_with_complex_content() -> Result<()> {
         // Create a temporary directory for the test vault
         let temp_dir = tempdir()?;
         let vault_dir = temp_dir.path();
 
+        // Create a test directory
+        let project_dir = "test";
+        let full_project_path = vault_dir.join(project_dir);
+        fs::create_dir_all(&full_project_path)?;
+
         // Create a test note with complex content
-        let title = "Complex Content Note";
-        let note_path = create_note(title, vault_dir, "test")?;
+        let filename = "Complex-Content-Note.md";
+        let relative_path = format!("{}/{}", project_dir, filename);
+        let full_path = vault_dir.join(&relative_path);
 
         // Create more complex content with multiple frontmatter-like sections
         let complex_content = r#"---
@@ -585,14 +605,14 @@ This is a horizontal rule, not a frontmatter delimiter.
 End of note.
 "#;
 
-        fs::write(&note_path, complex_content)?;
+        fs::write(&full_path, complex_content)?;
 
         // Read with frontmatter
-        let with_frontmatter = read_note(title, vault_dir, true)?;
+        let with_frontmatter = read_note(&relative_path, vault_dir, true)?;
         assert_eq!(with_frontmatter, complex_content);
 
         // Read without frontmatter
-        let without_frontmatter = read_note(title, vault_dir, false)?;
+        let without_frontmatter = read_note(&relative_path, vault_dir, false)?;
         assert!(!without_frontmatter.contains("title: Complex Content Note"));
         assert!(without_frontmatter.contains("# Main Content"));
         assert!(without_frontmatter.contains("This is a horizontal rule"));
