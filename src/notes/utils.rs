@@ -71,7 +71,7 @@ fn regex_escape(s: &str) -> String {
 }
 
 /// Converts serde_yaml::Value to serde_json::Value.
-fn yaml_to_json(yaml: serde_yaml::Value) -> JsonValue {
+pub fn yaml_to_json(yaml: serde_yaml::Value) -> JsonValue {
     match yaml {
         serde_yaml::Value::Null => JsonValue::Null,
         serde_yaml::Value::Bool(b) => JsonValue::Bool(b),
