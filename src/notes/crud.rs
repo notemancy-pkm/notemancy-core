@@ -53,7 +53,7 @@ pub fn create_note(title: &str, vault_directory: &Path, project: &str) -> Result
 
     // Create the frontmatter content
     let content = format!(
-        "---\ntitle: {}\ncreated_on: {}\nmodified_at: {}\n---\n\n",
+        "---\ntitle: {}\ncreated_on: {}\nmodified_at: {}\ntype:\ncontext:\ntags:\n---\n\n",
         title, date_str, timestamp_str
     );
 
