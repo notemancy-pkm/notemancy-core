@@ -212,17 +212,26 @@ pub fn relative_to_absolute(relative_path: &str, vault_directory: &Path) -> Resu
 /// * Returns an error if the note file can't be found
 /// * Returns an error if the ripgrep command fails
 /// * Returns an error if any path conversion fails
-pub fn get_backlinks(title: &str, vault_directory: &Path) -> Result<Vec<String>> {
-    // 1. Get the relative path to the note with the given title
-    let target_relpath = get_relpath(title, vault_directory)?;
-
-    // 2. Use ripgrep to search for all occurrences of the relative path in markdown files
+/// Finds all notes that link to a specific note by searching for its relative path.
+///
+/// # Arguments
+/// * `relative_path` - The relative path to the note within the vault directory
+/// * `vault_directory` - The base directory of the vault
+///
+/// # Returns
+/// * `Result<Vec<String>>` - A list of relative paths to notes that link to the specified note
+///
+/// # Errors
+/// * Returns an error if the ripgrep command fails
+/// * Returns an error if any path conversion fails
+pub fn get_backlinks(relative_path: &str, vault_directory: &Path) -> Result<Vec<String>> {
+    // Use ripgrep to search for all occurrences of the relative path in markdown files
     let output = Command::new("rg")
         .args(&[
             "--files-with-matches", // Only show filenames that match
             "--glob",
-            "*.md",          // Only search markdown files
-            &target_relpath, // Search pattern (the relative path)
+            "*.md",        // Only search markdown files
+            relative_path, // Search pattern (the relative path)
             vault_directory
                 .to_str()
                 .ok_or_else(|| anyhow!("Invalid vault directory path"))?,
@@ -239,7 +248,7 @@ pub fn get_backlinks(title: &str, vault_directory: &Path) -> Result<Vec<String>>
         }
     }
 
-    // 3. Get the list of absolute paths from the ripgrep output
+    // Get the list of absolute paths from the ripgrep output
     let stdout =
         String::from_utf8(output.stdout).context("Failed to parse ripgrep command output")?;
 
@@ -250,12 +259,12 @@ pub fn get_backlinks(title: &str, vault_directory: &Path) -> Result<Vec<String>>
         .filter(|s| !s.is_empty())
         .collect();
 
-    // 4. Convert absolute paths to relative paths
+    // Convert absolute paths to relative paths
     let mut relative_paths = Vec::new();
 
     for abs_path in absolute_paths {
         // Skip the target file itself - we don't consider self-links as backlinks
-        if Path::new(abs_path).file_stem() != Path::new(&target_relpath).file_stem() {
+        if Path::new(abs_path).file_stem() != Path::new(relative_path).file_stem() {
             let rel_path = absolute_to_relative(abs_path, vault_directory)?;
             relative_paths.push(rel_path);
         }
@@ -398,42 +407,6 @@ mod tests {
         let absolute_path = relative_to_absolute(relative_path, vault_dir)?;
 
         assert_eq!(absolute_path, expected_path);
-
-        Ok(())
-    }
-
-    // Note: We can't test get_relpath directly here without mocking get_file_path
-    // But we've tested the main components separately
-
-    #[test]
-    fn test_get_backlinks() -> Result<()> {
-        let temp_dir = tempdir()?;
-        let vault_dir = temp_dir.path();
-
-        // Create a test directory structure
-        let notes_dir = vault_dir.join("notes");
-        fs::create_dir_all(&notes_dir)?;
-
-        // Create a target note
-        let target_note_path = notes_dir.join("target-note.md");
-        fs::write(&target_note_path, "This is the target note")?;
-
-        // Create some notes that link to the target note
-        let backlink1_path = notes_dir.join("backlink1.md");
-        fs::write(
-            &backlink1_path,
-            "This links to [notes/target-note.md](notes/target-note.md)",
-        )?;
-
-        let backlink2_path = notes_dir.join("backlink2.md");
-        fs::write(&backlink2_path, "Another link to notes/target-note.md here")?;
-
-        let no_backlink_path = notes_dir.join("no-backlink.md");
-        fs::write(&no_backlink_path, "This note has no link to the target")?;
-
-        // We can't properly test this without mocking get_file_path and the ripgrep command
-        // In a real test, we would use a mocking framework or dependency injection
-        // For now, we'll skip the actual execution and just confirm the function exists
 
         Ok(())
     }
