@@ -92,7 +92,7 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use std::fs;
-    use std::io::Write;
+
     use std::path::PathBuf;
     use tempfile::tempdir;
 
