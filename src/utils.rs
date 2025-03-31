@@ -1,6 +1,6 @@
 // src/utils.rs
 
-use crate::notes::utils::get_file_path;
+use crate::notes::utils::{get_file_path, get_title}; // Make sure get_title is imported
 use anyhow::{Context, Result, anyhow};
 use serde_yaml;
 use std::fs;
@@ -200,38 +200,36 @@ pub fn relative_to_absolute(relative_path: &str, vault_directory: &Path) -> Resu
 }
 
 /// Finds all notes that link to a specific note by searching for its relative path.
+/// Returns a list of tuples containing the relative path and title of the linking notes.
 ///
 /// # Arguments
 /// * `title` - The title of the note to find backlinks for
 /// * `vault_directory` - The base directory of the vault
 ///
 /// # Returns
-/// * `Result<Vec<String>>` - A list of relative paths to notes that link to the specified note
+/// * `Result<Vec<(String, String)>>` - A list of (relative path, title) pairs for notes linking to the specified note
 ///
 /// # Errors
 /// * Returns an error if the note file can't be found
 /// * Returns an error if the ripgrep command fails
 /// * Returns an error if any path conversion fails
-/// Finds all notes that link to a specific note by searching for its relative path.
-///
-/// # Arguments
-/// * `relative_path` - The relative path to the note within the vault directory
-/// * `vault_directory` - The base directory of the vault
-///
-/// # Returns
-/// * `Result<Vec<String>>` - A list of relative paths to notes that link to the specified note
-///
-/// # Errors
-/// * Returns an error if the ripgrep command fails
-/// * Returns an error if any path conversion fails
-pub fn get_backlinks(relative_path: &str, vault_directory: &Path) -> Result<Vec<String>> {
+/// * Returns an error if the title of a backlinking note cannot be determined
+pub fn get_backlinks(title: &str, vault_directory: &Path) -> Result<Vec<(String, String)>> {
+    // Get the absolute path of the target note
+    let target_absolute_path_str = get_file_path(title, vault_directory)
+        .with_context(|| format!("Failed to find note with title: {}", title))?;
+    let target_absolute_path = Path::new(&target_absolute_path_str);
+
+    // Convert the absolute path to a relative path for searching
+    let target_relative_path = absolute_to_relative(&target_absolute_path_str, vault_directory)?;
+
     // Use ripgrep to search for all occurrences of the relative path in markdown files
     let output = Command::new("rg")
         .args(&[
             "--files-with-matches", // Only show filenames that match
             "--glob",
-            "*.md",        // Only search markdown files
-            relative_path, // Search pattern (the relative path)
+            "*.md",                // Only search markdown files
+            &target_relative_path, // Search pattern (the relative path)
             vault_directory
                 .to_str()
                 .ok_or_else(|| anyhow!("Invalid vault directory path"))?,
@@ -259,18 +257,28 @@ pub fn get_backlinks(relative_path: &str, vault_directory: &Path) -> Result<Vec<
         .filter(|s| !s.is_empty())
         .collect();
 
-    // Convert absolute paths to relative paths
-    let mut relative_paths = Vec::new();
+    let mut backlinks = Vec::new();
 
-    for abs_path in absolute_paths {
+    for abs_path_str in absolute_paths {
+        let abs_path = Path::new(abs_path_str);
+
         // Skip the target file itself - we don't consider self-links as backlinks
-        if Path::new(abs_path).file_stem() != Path::new(relative_path).file_stem() {
-            let rel_path = absolute_to_relative(abs_path, vault_directory)?;
-            relative_paths.push(rel_path);
+        if abs_path == target_absolute_path {
+            continue;
         }
+
+        // Convert absolute path to relative path
+        let rel_path = absolute_to_relative(abs_path_str, vault_directory)
+            .with_context(|| format!("Failed to convert path to relative: {}", abs_path_str))?;
+
+        // Get the title of the backlinking note
+        let backlink_title = get_title(abs_path)
+            .with_context(|| format!("Failed to get title for backlink file: {}", abs_path_str))?;
+
+        backlinks.push((rel_path, backlink_title));
     }
 
-    Ok(relative_paths)
+    Ok(backlinks)
 }
 
 #[cfg(test)]
@@ -366,7 +374,11 @@ mod tests {
         let absolute_path = test_file.to_string_lossy().to_string();
         let relative_path = absolute_to_relative(&absolute_path, vault_dir)?;
 
-        assert_eq!(relative_path, "test/test.md");
+        // Normalize paths for comparison on Windows
+        let expected_path = "test/test.md".replace('\\', "/");
+        let normalized_relative_path = relative_path.replace('\\', "/");
+
+        assert_eq!(normalized_relative_path, expected_path);
 
         // Test with a path outside the vault
         let outside_dir = tempdir()?;

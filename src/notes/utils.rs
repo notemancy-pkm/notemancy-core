@@ -263,7 +263,7 @@ pub fn check_unique_title(title: &str, vault_directory: &Path) -> Result<bool> {
     let sanitized_title = sanitize_title(title);
 
     // List all files in the vault directory
-    let all_files = list_all_notes_alt(vault_directory, true)?;
+    let all_files = list_all_notes(vault_directory, true)?;
 
     // Check if any file matches the sanitized title
     for file_path in all_files {
