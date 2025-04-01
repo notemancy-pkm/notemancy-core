@@ -1208,6 +1208,7 @@ dependencies = [
  "chrono",
  "env_logger",
  "once_cell",
+ "rayon",
  "regex",
  "rust-bert",
  "serde",

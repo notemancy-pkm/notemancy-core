@@ -308,45 +308,67 @@ pub fn check_unique_title(title: &str, vault_directory: &Path) -> Result<bool> {
 /// let file_path = get_file_path("My Note", vault_dir);
 /// ```
 pub fn get_file_path(title: &str, vault_directory: &Path) -> Result<String> {
-    // Sanitize the title
-    let sanitized_title = sanitize_title(title);
+    // Build a regex pattern that matches a line starting with "title:" followed by the title.
+    // This will match lines like "title: My Note" (allowing any whitespace after the colon).
+    let rg_pattern = format!("^title:\\s*{}", regex_escape(title));
 
-    // Create pattern to match either .md or .markdown extensions
-    let pattern = format!("^{}\\.(md|markdown)$", regex_escape(&sanitized_title));
-
-    // Execute fd command to find the file
-    let output = Command::new("fd")
+    // Use ripgrep to search for markdown files that contain the title in their frontmatter.
+    let rg_output = Command::new("rg")
         .args(&[
-            &pattern,
+            "--files-with-matches", // Only return the filenames with a match
+            "--glob",
+            "*.md", // Search markdown files
+            "--glob",
+            "*.markdown", // Also search .markdown files
+            &rg_pattern,  // The pattern to search for
+            vault_directory.to_str().unwrap_or("."),
+        ])
+        .output()
+        .context("Failed to execute ripgrep command. Is 'rg' installed?")?;
+
+    // If ripgrep was successful and returned a match, use that.
+    if rg_output.status.success() {
+        let rg_stdout =
+            String::from_utf8(rg_output.stdout).context("Failed to parse ripgrep output")?;
+        let rg_file_paths: Vec<&str> = rg_stdout
+            .trim()
+            .split('\n')
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !rg_file_paths.is_empty() {
+            return Ok(rg_file_paths[0].to_string());
+        }
+    }
+
+    // Fallback: search by sanitized filename using fd.
+    let sanitized = sanitize_title(title);
+    let fd_pattern = format!("^{}\\.(md|markdown)$", regex_escape(&sanitized));
+    let fd_output = Command::new("fd")
+        .args(&[
+            &fd_pattern,
             vault_directory.to_str().unwrap_or("."),
             "--type",
             "f", // Only find files
         ])
         .output()
         .context("Failed to execute fd command")?;
-
-    if !output.status.success() {
+    if !fd_output.status.success() {
         return Err(anyhow!(
             "fd command failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            String::from_utf8_lossy(&fd_output.stderr)
         ));
     }
-
-    // Get the output as a string
-    let stdout = String::from_utf8(output.stdout).context("Failed to parse fd command output")?;
-
-    // Split by newlines and get the first match (if any)
-    let file_paths: Vec<&str> = stdout
+    let fd_stdout =
+        String::from_utf8(fd_output.stdout).context("Failed to parse fd command output")?;
+    let fd_file_paths: Vec<&str> = fd_stdout
         .trim()
         .split('\n')
         .filter(|s| !s.is_empty())
         .collect();
-
-    if file_paths.is_empty() {
+    if fd_file_paths.is_empty() {
         Err(anyhow!("No markdown file found with title: {}", title))
     } else {
-        // Return the first match
-        Ok(file_paths[0].to_string())
+        Ok(fd_file_paths[0].to_string())
     }
 }
 

@@ -237,16 +237,30 @@ pub fn get_backlinks(title: &str, vault_directory: &Path) -> Result<Vec<(String,
         .output()
         .context("Failed to execute ripgrep command. Is 'rg' installed?")?;
 
+    // Check the exit status of ripgrep
     if !output.status.success() {
-        // If ripgrep exits with a non-zero status but the error is "no matches found",
-        // we treat this as an empty result rather than an error
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stderr.contains("no matches found") {
-            return Err(anyhow!("ripgrep command failed: {}", stderr));
+        // ripgrep exits with 1 if no matches are found.
+        // Treat exit code 1 as a successful run with empty results.
+        // Any other non-zero exit code is treated as a genuine error.
+        match output.status.code() {
+            Some(1) => {
+                // Exit code 1 means no matches were found, which is not an error for us.
+                // Return an empty vector.
+                return Ok(Vec::new());
+            }
+            _ => {
+                // Any other error (e.g., exit code 2, signal termination) is a real error.
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(anyhow!(
+                    "ripgrep command failed with status {}: {}",
+                    output.status,
+                    stderr.trim()
+                ));
+            }
         }
     }
 
-    // Get the list of absolute paths from the ripgrep output
+    // If we reach here, ripgrep executed successfully (exit code 0) and found matches.
     let stdout =
         String::from_utf8(output.stdout).context("Failed to parse ripgrep command output")?;
 

@@ -2,6 +2,7 @@
 pub mod kanban;
 pub mod notes;
 pub mod query;
+pub mod query_native;
 pub mod query_parser;
 pub mod tags;
 pub mod utils;
